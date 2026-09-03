@@ -239,6 +239,11 @@ class FinanceInputs:
     degradation_pct_per_year: float | None = None
     import_tariff_per_kwh: float | None = None
     export_tariff_per_kwh: float | None = None
+    #: Export credited against consumption rather than paid out, as under DEWA's
+    #: Shams Dubai scheme. Exported units offset imported ones at the retail
+    #: rate; anything beyond the site's own annual consumption earns only the
+    #: export tariff, which for DEWA is nothing.
+    net_metering: bool = False
     grid_emission_factor_t_per_mwh: float | None = None
     capex_per_kwp: float | None = None
     battery_capex_per_kwh: float | None = None

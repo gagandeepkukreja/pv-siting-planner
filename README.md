@@ -16,6 +16,7 @@ Markets: United Kingdom, India, United Arab Emirates.
 | Battery dispatch and sizing | built, tested |
 | Financial model (NPV, IRR, payback, LCOE) | built, tested |
 | Market incentives (PM Surya Ghar, UK AIA) | built, tested |
+| UAE: net metering, per-Wp costs, DEWA rows | built, tested |
 | Marginal abatement cost curve | all six tranches built, tested |
 | Agentic intake and orchestration | built, verified live against `gemini-flash-latest` |
 | One-page HTML report with satellite image | built |
@@ -94,6 +95,14 @@ recovered against an export limit — which is exactly the case a net-metering c
 creates, and the Dubai row in the benchmark data says that cap is what "drives
 the battery case".
 
+**Export under net metering is only worth the retail rate while there is an
+import left to cancel.** Under DEWA's Shams Dubai scheme export is credited
+against consumption rather than paid out, so past the point where the site's own
+annual consumption is cancelled, further generation earns only the surplus rate —
+nothing, in DEWA's case. That ceiling is what caps the value of oversizing and,
+as the benchmark data puts it, "drives the battery case". Set
+`FinanceInputs.net_metering` for any market that credits rather than pays.
+
 **Dispatch reserves capacity for clipped energy.** A controller that charges
 from any available surplus fills the pack in the morning and has no headroom
 left when clipping happens around midday — in testing it was full for 372 of the
@@ -123,6 +132,13 @@ what a real controller with an export limit does.
   per tonne regardless.
 - Dispatch has no foresight. A perfect-foresight or MPC controller would beat the
   reserve heuristic.
+- The UAE has no published present-day grid emission factor. The CSV carries a
+  2019 baseline and a 2030 target; neither is a current figure, and the app says
+  so rather than letting either stand in. Supply one from the DEWA Sustainability
+  Report for Dubai, or ADDC/EWEC for Abu Dhabi.
+- Net metering holds the self-consumed, credited and paid-export shares fixed as
+  output degrades. The split shifts slightly year to year, but not enough to
+  justify re-running dispatch for all 25 years.
 
 ## Licence
 

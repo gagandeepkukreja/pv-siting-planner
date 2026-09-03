@@ -128,11 +128,28 @@ class EnergyBalance:
     generation_kwh: float
     self_consumed_kwh: float
     exported_kwh: float
+    #: Grid purchase remaining after self-consumption. Only needed for net
+    #: metering, where export can offset an import that would otherwise happen.
+    imported_kwh: float = 0.0
 
     @property
     def offset_kwh(self) -> float:
         """Energy that displaces an import — the part valued at the retail tariff."""
         return self.self_consumed_kwh
+
+    def export_split(self, net_metering: bool) -> tuple[float, float]:
+        """(credited at the retail rate, paid at the export rate).
+
+        Under net metering an exported unit is only worth the retail rate while
+        there is an import left to cancel. Beyond the site's own consumption the
+        credit has nothing to offset, so further export earns the export tariff —
+        which under DEWA is zero. That ceiling is what caps the value of
+        oversizing and is the whole reason a battery earns its place in Dubai.
+        """
+        if not net_metering:
+            return (0.0, self.exported_kwh)
+        credited = min(self.exported_kwh, self.imported_kwh)
+        return (credited, self.exported_kwh - credited)
 
 
 def build_cashflows(balance: EnergyBalance, inputs: FinanceInputs) -> list[float]:
@@ -147,12 +164,15 @@ def build_cashflows(balance: EnergyBalance, inputs: FinanceInputs) -> list[float
     capex = total_capex(balance, inputs)
 
     generation = degraded_generation(balance.generation_kwh, inputs.degradation_pct_per_year, life)
-    offset_share = (
-        balance.offset_kwh / balance.generation_kwh if balance.generation_kwh > 0.0 else 0.0
-    )
-    export_share = (
-        balance.exported_kwh / balance.generation_kwh if balance.generation_kwh > 0.0 else 0.0
-    )
+    credited_kwh, paid_kwh = balance.export_split(inputs.net_metering)
+    total_gen = balance.generation_kwh
+    share = lambda kwh: (kwh / total_gen if total_gen > 0.0 else 0.0)  # noqa: E731
+    # Shares are held fixed as output degrades: the split between self-consumed,
+    # credited and paid export shifts slightly year to year, but not enough to
+    # justify re-running dispatch for every year of the appraisal.
+    offset_share = share(balance.offset_kwh)
+    credited_share = share(credited_kwh)
+    paid_share = share(paid_kwh)
     import_tariff = escalated(inputs.import_tariff_per_kwh, inputs.tariff_escalation, life)
     export_tariff = escalated(inputs.export_tariff_per_kwh or 0.0, inputs.tariff_escalation, life)
 
@@ -160,7 +180,9 @@ def build_cashflows(balance: EnergyBalance, inputs: FinanceInputs) -> list[float
     for year in range(life):
         gen = generation[year]
         revenue = gen * offset_share * import_tariff[year]
-        revenue += gen * export_share * export_tariff[year]
+        # Credited export is worth the retail rate; it cancels a bill line.
+        revenue += gen * credited_share * import_tariff[year]
+        revenue += gen * paid_share * export_tariff[year]
         net = revenue - inputs.opex_per_year
         # Calendar years are 1-based; `year` is the 0-based loop index.
         net -= float(inputs.year_costs.get(year + 1, 0.0))

@@ -256,6 +256,31 @@ def hourly_to_heatmap(hourly: list[float]) -> list[list[float]]:
     return [[hourly[day * 24 + hour] for day in range(365)] for hour in range(24)]
 
 
+#: Several benchmark rows quote a single figure rather than a range (peak sun
+#: hours, for instance). Comparing against a zero-width band would flag every
+#: real result, so a point benchmark is widened to plus or minus this.
+POINT_BENCHMARK_TOLERANCE = 0.20
+
+
+def peak_sun_hours_to_specific_yield(peak_sun_hours: float, system_loss_pct: float) -> float:
+    """Convert peak sun hours to the AC specific yield it implies.
+
+    Peak sun hours are plane-of-array irradiation, not delivered output: a site
+    with 2200 peak sun hours does not produce 2200 kWh per kWp, because inverter,
+    cabling, thermal and soiling losses come off first. Comparing a specific
+    yield against the raw figure would flag every correct result in the Gulf.
+    """
+    return peak_sun_hours * (1.0 - system_loss_pct / 100.0)
+
+
+def widen_point_benchmark(low: float, high: float,
+                          tolerance: float = POINT_BENCHMARK_TOLERANCE) -> tuple[float, float]:
+    """Give a single-figure benchmark a usable band."""
+    if high > low:
+        return (low, high)
+    return (low * (1.0 - tolerance), high * (1.0 + tolerance))
+
+
 def sanity_check_specific_yield(result: YieldResult, benchmark_low: float,
                                 benchmark_high: float) -> str | None:
     """Compare specific yield against a market benchmark band.
@@ -265,6 +290,7 @@ def sanity_check_specific_yield(result: YieldResult, benchmark_low: float,
     specific = result.specific_yield_kwh_per_kwp
     if not math.isfinite(specific) or specific <= 0.0:
         return "specific yield is zero; check the array capacity"
+    benchmark_low, benchmark_high = widen_point_benchmark(benchmark_low, benchmark_high)
     if specific < benchmark_low:
         return (
             f"specific yield {specific:.0f} kWh/kWp is below the benchmark band "

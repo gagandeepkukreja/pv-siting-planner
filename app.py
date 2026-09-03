@@ -547,21 +547,28 @@ def screen_yield(sc: Scenario) -> None:
 
 def _yield_cross_check(sc: Scenario, result) -> None:
     """Sanity check specific yield against the market's cited rule of thumb."""
+    # (parameter, scale to kWh/kWp/yr, whether the figure is irradiation rather
+    # than delivered output). Peak sun hours are plane-of-array irradiation, so
+    # system losses have to come off before it can be compared with a yield.
     lookups = {
         Market.UK: None,
-        Market.INDIA: ("Typical daily specific yield", 365.0),
-        Market.UAE: ("Peak sun hours Dubai", 1.0),
+        Market.INDIA: ("Typical daily specific yield", 365.0, False),
+        Market.UAE: ("Peak sun hours Dubai", 1.0, True),
     }
     lookup = lookups.get(sc.site.market)
     if lookup is None:
         return
-    parameter, scale = lookup
+    parameter, scale, is_irradiation = lookup
     try:
         row = table().find(parameter, market=sc.site.market.value)
         low = row.value(benchmarks.Band.LOW) * scale
         high = row.value(benchmarks.Band.HIGH) * scale
     except (benchmarks.BenchmarkNotFound, benchmarks.GapError):
         return
+    if is_irradiation:
+        low = resource.peak_sun_hours_to_specific_yield(low, result.system_loss_pct)
+        high = resource.peak_sun_hours_to_specific_yield(high, result.system_loss_pct)
+    low, high = resource.widen_point_benchmark(low, high)
     message = resource.sanity_check_specific_yield(result, low, high)
     if message:
         st.warning(f"{message}. Benchmark: {row.citation()}.")
@@ -672,8 +679,8 @@ def screen_finance(sc: Scenario) -> None:
             "Installed cost", market, "capex", currency + " per kWp", sc.layout.kwp
         )
         battery_capex = _battery_capex_input(sc, market, currency)
-        opex = st.number_input(f"Annual opex ({currency}/yr)", 0.0, 1e9,
-                               float(sc.finance_inputs.opex_per_year), 100.0)
+        lump_sums = _lump_sum_input(market, currency)
+        opex = _opex_input(market, currency)
         year_costs = _replacement_costs_input(market, currency)
         grid_factor = _grid_factor_input(market)
 
@@ -685,8 +692,7 @@ def screen_finance(sc: Scenario) -> None:
         escalation = st.number_input("Tariff escalation (% per year)", -10.0, 30.0, 0.0, 0.1)
         import_tariff = st.number_input(f"Import tariff ({currency}/kWh)", 0.0, 100.0, 0.0, 0.01,
                                         format="%.4f")
-        export_tariff = st.number_input(f"Export tariff ({currency}/kWh)", 0.0, 100.0, 0.0, 0.01,
-                                        format="%.4f")
+        net_metering, export_tariff = _export_terms(market, currency)
         life = st.number_input("Project life (years)", 1, 40,
                                int(market_table.get("Project life")))
         degradation = st.number_input(
@@ -695,7 +701,8 @@ def screen_finance(sc: Scenario) -> None:
         )
 
     # Incentives are computed from the cited slab structure, not typed into a box.
-    provisional_capex = capex * sc.layout.kwp + battery_capex * sc.battery.usable_kwh
+    provisional_capex = (capex * sc.layout.kwp + battery_capex * sc.battery.usable_kwh
+                         + sum(lump_sums.values()))
     scheme = incentives.for_market(market, sc.layout.kwp, provisional_capex, table())
     _incentive_panel(scheme, currency)
 
@@ -708,6 +715,8 @@ def screen_finance(sc: Scenario) -> None:
         export_tariff_per_kwh=export_tariff,
         grid_emission_factor_t_per_mwh=grid_factor,
         capex_per_kwp=capex,
+        capex_lump_sums=lump_sums,
+        net_metering=net_metering,
         battery_capex_per_kwh=battery_capex,
         battery_usable_kwh=sc.battery.usable_kwh,
         opex_per_year=opex,
@@ -768,6 +777,7 @@ def _energy_balance(sc: Scenario) -> finance.EnergyBalance:
             generation_kwh=sc.yield_result.annual_kwh,
             self_consumed_kwh=sc.dispatch.self_consumed_kwh + sc.dispatch.discharged_kwh,
             exported_kwh=sc.dispatch.exported_kwh,
+            imported_kwh=sc.dispatch.imported_kwh,
         )
     # No dispatch run: everything is treated as exported, which is the
     # pessimistic read and is flagged on screen.
@@ -807,14 +817,32 @@ def _grid_factor_input(market: str) -> float | None:
     """Grid emission factor, in tCO2e/MWh, from the cited rows where one exists."""
     rows = [r for r in table().for_market(market, include_all=False).category("carbon")]
     usable = [r for r in rows if not r.is_gap]
+    gaps = [r for r in rows if r.is_gap]
     if not usable:
         st.warning(
-            "No present-day grid emission factor is available for this market — every "
-            "carbon row is tiered `gap`. Enter one or the abatement curve stays empty."
+            "No present-day grid emission factor is published for this market. "
+            "Every carbon row here is tiered `gap`."
         )
+        for gap in gaps:
+            st.caption(gap.remarks)
         entered = st.number_input("Grid emission factor (tCO2e/MWh)", 0.0, 2.0, 0.0, 0.001,
                                   format="%.3f")
         return entered if entered > 0.0 else None
+    if gaps:
+        st.warning(
+            "The present-day factor for this market is a `gap`. The rows below are a "
+            "historic baseline and a forward target — neither is a current factor, and "
+            "using one as if it were will misstate abatement in both directions."
+        )
+        for gap in gaps:
+            st.caption(gap.remarks)
+        override = st.number_input(
+            "Present-day grid emission factor (tCO2e/MWh) — leave at 0 to use a dated row",
+            0.0, 2.0, 0.0, 0.001, format="%.3f",
+        )
+        if override > 0.0:
+            st.caption("Using your figure. Record its source in the report notes.")
+            return override
     chosen = st.selectbox(
         "Grid emission factor", usable,
         format_func=lambda r: f"{r.parameter} [{r.source_tier.value}]",
@@ -849,6 +877,80 @@ def _battery_capex_input(sc: Scenario, market: str, currency: str) -> float:
         st.caption(f"{row.parameter}: {per_kwh:g} {row.unit}. Source: {row.citation()}.")
     return st.number_input(f"Battery cost ({currency}/usable kWh)", 0.0, 1e6,
                            float(round(per_kwh, 2)), 10.0)
+
+
+def _lump_sum_input(market: str, currency: str) -> dict[str, float]:
+    """One-off capex items cited for this market, each opt-in.
+
+    The UAE rows carry two that are easy to leave out of a quote and material to
+    the answer: the DEWA grid connection and bidirectional meter, and roof
+    strengthening on older villas.
+    """
+    rows = [r for r in table().for_market(market, include_all=False).category("capex")
+            if r.unit == "lump_sum" and not r.is_gap]
+    if not rows:
+        return {}
+    chosen: dict[str, float] = {}
+    with st.expander(f"One-off costs ({len(rows)} cited)"):
+        for row in rows:
+            include = st.checkbox(row.parameter, value=False, key=f"lump_{row.parameter}")
+            st.caption(f"{row.low:,.0f}–{row.high:,.0f} {row.currency}. {row.remarks}")
+            if include:
+                chosen[row.parameter] = st.number_input(
+                    f"{row.parameter} ({currency})", 0.0, 1e9, float(row.value()), 100.0,
+                    key=f"lumpval_{row.parameter}",
+                )
+    return chosen
+
+
+def _opex_input(market: str, currency: str) -> float:
+    """Annual running costs, seeded from the cited recurring rows."""
+    rows = [r for r in table().for_market(market, include_all=False).category("opex")
+            if r.unit.startswith("per_year") and not r.is_gap]
+    total = 0.0
+    if rows:
+        with st.expander(f"Annual running costs ({len(rows)} cited)"):
+            for row in rows:
+                value = st.number_input(
+                    f"{row.parameter} ({currency}/yr)", 0.0, 1e9, float(row.value()), 50.0,
+                    key=f"opex_{row.parameter}",
+                )
+                st.caption(f"{row.citation()}. {row.remarks}")
+                total += value
+        st.caption(f"Annual opex: {total:,.0f} {currency}/yr from {len(rows)} cited rows.")
+        return total
+    return st.number_input(f"Annual opex ({currency}/yr)", 0.0, 1e9, 0.0, 100.0)
+
+
+def _export_terms(market: str, currency: str) -> tuple[bool, float]:
+    """Whether export is credited against consumption, and what surplus is worth."""
+    try:
+        row = table().find("Net metering", market=market)
+        cited = True
+    except benchmarks.BenchmarkNotFound:
+        row, cited = None, False
+
+    net_metering = st.checkbox(
+        "Export is credited against consumption, not paid out",
+        value=cited,
+        help="Under a net-metering scheme an exported unit only has value while "
+             "there is an import left to cancel. Beyond the site's own annual "
+             "consumption it earns the export tariff, which may be nothing.",
+    )
+    if cited and row is not None:
+        st.caption(f"{row.parameter}: {row.remarks} Source: {row.citation()}.")
+    if net_metering:
+        st.caption(
+            "This caps the value of oversizing: past the point where the site's own "
+            "consumption is cancelled out, extra generation earns only the surplus "
+            "rate. That ceiling is what makes the battery case."
+        )
+    export_tariff = st.number_input(
+        f"Surplus export tariff ({currency}/kWh)" if net_metering
+        else f"Export tariff ({currency}/kWh)",
+        0.0, 100.0, 0.0, 0.01, format="%.4f",
+    )
+    return net_metering, export_tariff
 
 
 def _replacement_costs_input(market: str, currency: str) -> dict[int, float]:
