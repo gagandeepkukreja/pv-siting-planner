@@ -15,24 +15,40 @@ from typing import Iterable
 
 from .scenario import ModuleSpec
 
-# Frame widths, in metres, by series-cell count. Standard glass sizes: 60/66-cell
-# modules are ~1.0 m wide, 72-cell and larger half-cut formats ~1.13 m.
-_WIDTH_BY_CELLS: tuple[tuple[int, float], ...] = (
-    (36, 0.67),
-    (48, 0.80),
-    (60, 0.99),
-    (66, 1.03),
-    (72, 1.13),
-    (96, 1.05),
-    (120, 1.13),
-    (132, 1.13),
-    (144, 1.13),
+# Cell columns across the frame, by series-cell count. Almost every crystalline
+# module is six cells wide; the 96-cell back-contact format is eight.
+#
+# Width is derived from cell *pitch*, not from a fixed table of frame widths. A
+# fixed table cannot work: the CEC database reports both a classic 156 mm
+# 72-cell module (992 mm wide) and a modern 182 mm half-cut one (1134 mm wide)
+# as N_s = 72, so cell count alone does not identify the format. Cell pitch,
+# recovered from cell area over cell count, does.
+_COLUMNS_BY_CELLS: tuple[tuple[int, int], ...] = (
+    (36, 4),
+    (48, 4),
+    (60, 6),
+    (66, 6),
+    (72, 6),
+    (96, 8),
+    (120, 6),
+    (132, 6),
+    (144, 6),
 )
+_DEFAULT_COLUMNS = 6
 _DEFAULT_WIDTH_M = 1.05
 
-# Glass-to-frame overhead: the CEC `A_c` is aperture cell area, a little under
-# the outer frame footprint.
+# Above this count the cells are half-cut: twice as many, each half as tall, so
+# the pitch calculation has to account for a 2:1 cell rather than a square one.
+_HALF_CUT_THRESHOLD = 100
+
+# Glass-to-frame overhead, used only where the cell grid is unknown: the CEC
+# `A_c` is aperture cell area, a little under the outer frame footprint.
 _FRAME_OVERHEAD = 1.06
+
+# Inter-cell gaps plus the frame border, as a linear scale on each dimension
+# once the cell grid is known. Calibrated against published datasheets for
+# 60-, 72- and 96-cell modules.
+_FRAME_BORDER = 1.005
 
 
 class ModuleNotFound(LookupError):
@@ -47,20 +63,56 @@ def _cec_table():
     return retrieve_sam("CECMod")
 
 
-def frame_width_m(cells_in_series: int | None) -> float:
-    """Nominal frame width for a cell count, nearest bin."""
+def cell_columns(cells_in_series: int | None) -> int:
+    """How many cells sit across the frame, for a given series-cell count."""
     if not cells_in_series or cells_in_series <= 0:
+        return _DEFAULT_COLUMNS
+    return min(_COLUMNS_BY_CELLS, key=lambda pair: abs(pair[0] - cells_in_series))[1]
+
+
+def frame_width_m(cells_in_series: int | None, area_m2: float | None = None) -> float:
+    """Frame width, derived from cell pitch where cell area is known.
+
+    For a full-cell module the cells are square, so pitch is the square root of
+    cell area. For a half-cut module each cell is twice as wide as it is tall,
+    so the pitch is the square root of twice the cell area. Multiplying by the
+    column count gives the width across the glass.
+    """
+    if not cells_in_series or cells_in_series <= 0 or not area_m2 or area_m2 <= 0.0:
         return _DEFAULT_WIDTH_M
-    return min(_WIDTH_BY_CELLS, key=lambda pair: abs(pair[0] - cells_in_series))[1]
+    cell_area = area_m2 / cells_in_series
+    if cells_in_series >= _HALF_CUT_THRESHOLD:
+        pitch = math.sqrt(2.0 * cell_area)
+    else:
+        pitch = math.sqrt(cell_area)
+    return cell_columns(cells_in_series) * pitch
 
 
 def dimensions_from_area(area_m2: float, cells_in_series: int | None) -> tuple[float, float]:
-    """(width_m, height_m) for a module of the given cell area."""
+    """(width_m, height_m) for a module of the given cell area.
+
+    Both dimensions come from the cell grid — columns across, rows down, at the
+    pitch implied by cell area. Deriving only the width from the grid and then
+    solving the height from total area compounds the frame overhead into one
+    dimension, which overstated module length by around 5% and, through row
+    pitch, understated how many rows fit on a roof.
+    """
     if area_m2 <= 0.0:
         raise ValueError("module area must be positive")
-    width = frame_width_m(cells_in_series)
-    height = (area_m2 * _FRAME_OVERHEAD) / width
-    return (width, height)
+    if not cells_in_series or cells_in_series <= 0:
+        width = _DEFAULT_WIDTH_M
+        return (width, (area_m2 * _FRAME_OVERHEAD) / width)
+
+    columns = cell_columns(cells_in_series)
+    cell_area = area_m2 / cells_in_series
+    half_cut = cells_in_series >= _HALF_CUT_THRESHOLD
+    pitch = math.sqrt(2.0 * cell_area) if half_cut else math.sqrt(cell_area)
+    rows = cells_in_series / columns
+
+    width = columns * pitch
+    height = rows * (pitch / 2.0 if half_cut else pitch)
+    # Inter-cell gaps and the frame border, spread across both dimensions.
+    return (width * _FRAME_BORDER, height * _FRAME_BORDER)
 
 
 def technologies() -> list[str]:

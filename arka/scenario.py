@@ -195,6 +195,9 @@ class BatterySpec:
     round_trip_efficiency: float = 0.90
     min_soc_fraction: float = 0.0
     initial_soc_fraction: float = 0.0
+    #: Share of the pack held back for energy that would otherwise be clipped by
+    #: an export limit. Only meaningful when an export limit applies.
+    curtailment_reserve_fraction: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -238,8 +241,13 @@ class FinanceInputs:
     export_tariff_per_kwh: float | None = None
     grid_emission_factor_t_per_mwh: float | None = None
     capex_per_kwp: float | None = None
+    battery_capex_per_kwh: float | None = None
+    battery_usable_kwh: float = 0.0
     capex_lump_sums: dict[str, float] = field(default_factory=dict)
     opex_per_year: float = 0.0
+    #: Calendar year (1-based) -> one-off cost, for mid-life replacements. The
+    #: UAE benchmark rows call for an inverter replacement around year 12.
+    year_costs: dict[int, float] = field(default_factory=dict)
     incentives_year_one: float = 0.0
     currency: str = "GBP"
 

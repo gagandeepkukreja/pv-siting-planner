@@ -18,17 +18,27 @@ without an API key.
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from . import tools
 from .schema import Intake, Narrative
 
+log = logging.getLogger(__name__)
+
 DEFAULT_MODEL = "gemini-flash-latest"
 API_KEY_ENV = "GEMINI_API_KEY"
+
+# Transient upstream conditions. The model endpoint sheds load under demand
+# spikes exactly as PVGIS does, so it gets the same exponential backoff rather
+# than surfacing a 503 to someone mid-appraisal.
+_RETRYABLE = ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "INTERNAL")
+_MAX_ATTEMPTS = 4
 
 SYSTEM_INSTRUCTION = """\
 You are the intake and narration layer of Arka, a PV siting and sizing planner.
@@ -227,11 +237,11 @@ class ArkaAgent:
     def parse_intake(self, message: str) -> Intake:
         """Turn free text into a structured intake. No figures are produced."""
         client = self._connect()
-        response = client.models.generate_content(
+        response = _with_retry(lambda: client.models.generate_content(
             model=self.model,
             contents=message,
             config=self._config(response_schema=Intake),
-        )
+        ))
         parsed = getattr(response, "parsed", None)
         if isinstance(parsed, Intake):
             return parsed
@@ -240,11 +250,11 @@ class ArkaAgent:
     def orchestrate(self, message: str) -> Turn:
         """Let the model choose deterministic tools and report what it ran."""
         client = self._connect()
-        response = client.models.generate_content(
+        response = _with_retry(lambda: client.models.generate_content(
             model=self.model,
             contents=message,
             config=self._config(with_tools=True),
-        )
+        ))
         turn = Turn(text=getattr(response, "text", "") or "")
         for call in _function_calls(response):
             name = call.get("name")
@@ -274,11 +284,11 @@ class ArkaAgent:
             "Quote them exactly.\n\n"
             f"Figures:\n{figures}\n\nBrief: {brief}"
         )
-        response = client.models.generate_content(
+        response = _with_retry(lambda: client.models.generate_content(
             model=self.model,
             contents=prompt,
             config=self._config(response_schema=Narrative),
-        )
+        ))
         parsed = getattr(response, "parsed", None)
         narrative = parsed if isinstance(parsed, Narrative) else Narrative.model_validate_json(response.text)
         offenders = verify_no_invented_numbers(
@@ -287,6 +297,24 @@ class ArkaAgent:
         if offenders:
             raise NumberGuardError(offenders)
         return narrative
+
+
+def _with_retry(call: Any, attempts: int = _MAX_ATTEMPTS) -> Any:
+    """Run a model call, backing off on transient upstream failures."""
+    last: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return call()
+        except Exception as exc:  # SDK raises typed errors we do not import here
+            text = str(exc)
+            if not any(token in text for token in _RETRYABLE) or attempt == attempts - 1:
+                raise
+            last = exc
+            backoff = 2.0 ** attempt
+            log.warning("model call attempt %d failed (%s), retrying in %.0fs",
+                        attempt + 1, text[:120], backoff)
+            time.sleep(backoff)
+    raise AgentError(f"model unavailable after {attempts} attempts: {last}")
 
 
 def _function_calls(response: Any) -> list[dict[str, Any]]:

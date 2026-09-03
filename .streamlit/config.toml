@@ -1,4 +1,3 @@
-# Styling is deliberately minimal — CLAUDE.md build order puts UI styling last.
 [server]
 headless = true
 
@@ -7,3 +6,8 @@ gatherUsageStats = false
 
 [theme]
 base = "light"
+primaryColor = "#c2571a"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f5f3ef"
+textColor = "#1c1b19"
+font = "sans serif"

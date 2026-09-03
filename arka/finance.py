@@ -162,6 +162,8 @@ def build_cashflows(balance: EnergyBalance, inputs: FinanceInputs) -> list[float
         revenue = gen * offset_share * import_tariff[year]
         revenue += gen * export_share * export_tariff[year]
         net = revenue - inputs.opex_per_year
+        # Calendar years are 1-based; `year` is the 0-based loop index.
+        net -= float(inputs.year_costs.get(year + 1, 0.0))
         if year == 0:
             net += inputs.incentives_year_one
         flows.append(net)
@@ -169,16 +171,37 @@ def build_cashflows(balance: EnergyBalance, inputs: FinanceInputs) -> list[float
 
 
 def total_capex(balance: EnergyBalance, inputs: FinanceInputs) -> float:
-    """Capex from the per-kWp rate plus any lump sums.
+    """Capex from the per-kWp rate, the battery, and any lump sums.
 
     Benchmarks quoted per Wp (the UAE rows) must be multiplied by 1000 by the
     caller before they land here; this function does not guess at units.
+
+    Battery cost is priced on *usable* kWh, matching how the benchmark rows are
+    denominated. Omitting it would let a larger battery improve self-consumption,
+    and therefore NPV, at no capital cost — which is precisely the decision the
+    storage screen exists to inform.
     """
     if inputs.capex_per_kwp is None:
         raise FinanceError("capex_per_kwp is required")
     if balance.kwp <= 0.0:
         raise FinanceError("array capacity must be positive to cost a project")
-    return float(inputs.capex_per_kwp) * balance.kwp + float(sum(inputs.capex_lump_sums.values()))
+    total = float(inputs.capex_per_kwp) * balance.kwp
+    total += battery_capex(inputs)
+    total += float(sum(inputs.capex_lump_sums.values()))
+    return total
+
+
+def battery_capex(inputs: FinanceInputs) -> float:
+    """Capital cost of storage, priced per usable kWh."""
+    if inputs.battery_usable_kwh <= 0.0:
+        return 0.0
+    if inputs.battery_capex_per_kwh is None:
+        raise FinanceError(
+            f"a {inputs.battery_usable_kwh:g} kWh battery is specified but no cost per kWh "
+            "was supplied. A battery that improves self-consumption for free would make "
+            "every storage comparison wrong."
+        )
+    return float(inputs.battery_capex_per_kwh) * float(inputs.battery_usable_kwh)
 
 
 def evaluate(balance: EnergyBalance, inputs: FinanceInputs) -> FinanceResult:
@@ -188,7 +211,10 @@ def evaluate(balance: EnergyBalance, inputs: FinanceInputs) -> FinanceResult:
     life = int(inputs.project_life_years)
     capex = total_capex(balance, inputs)
     generation = degraded_generation(balance.generation_kwh, inputs.degradation_pct_per_year, life)
-    opex = [inputs.opex_per_year] * life
+    # Mid-life replacements are lifetime costs and belong in the levelised figure
+    # too, otherwise LCOE and the cashflow tell different stories about the same
+    # project.
+    opex = [inputs.opex_per_year + float(inputs.year_costs.get(y + 1, 0.0)) for y in range(life)]
 
     return FinanceResult(
         npv=npv(rate, flows),
@@ -261,6 +287,141 @@ def macc_curve(steps: list[MaccStep]) -> list[dict[str, float | str]]:
         )
         cursor += width
     return bars
+
+
+@dataclass(frozen=True)
+class Tranche:
+    """One increment on the abatement ladder, before it is priced.
+
+    `delta_annual_kwh` is the *additional* energy this step delivers in year one,
+    over and above everything to its left.
+    """
+
+    label: str
+    delta_capex: float
+    delta_annual_kwh: float
+    delta_opex_per_year: float = 0.0
+
+
+def pv_tranches(total_capex: float, annual_kwh: float, count: int = 3,
+                labels: list[str] | None = None) -> list[Tranche]:
+    """Split the array into equal additive tranches.
+
+    Equal splitting is a simplification: real capex per kWp falls with scale, so
+    a true first tranche costs more per watt than the third. The benchmark rows
+    carry that scale effect by system size if a caller wants to model it.
+    """
+    if count <= 0:
+        raise FinanceError("need at least one PV tranche")
+    names = labels or [f"PV tranche {i + 1}" for i in range(count)]
+    return [
+        Tranche(label=names[i], delta_capex=total_capex / count,
+                delta_annual_kwh=annual_kwh / count)
+        for i in range(count)
+    ]
+
+
+def battery_tranches(
+    sizes_kwh: list[float],
+    recovered_kwh: list[float],
+    capex_per_kwh: float,
+    opex_per_kwh_year: float = 0.0,
+) -> list[Tranche]:
+    """Additive battery increments.
+
+    `recovered_kwh` must be energy that would otherwise have been *thrown away* —
+    curtailed against an export limit or an export cap — not merely energy moved
+    from export to self-consumption.
+
+    This distinction decides whether the battery bars mean anything. Exported
+    energy still displaces grid generation somewhere, so shifting a kWh from
+    export to self-consumption changes who is paid for it, not how much carbon is
+    avoided. Counting that shift as abatement would double-count energy already
+    credited to the PV tranches. A battery abates carbon only where the
+    alternative was curtailment — which is exactly the case a net-metering cap
+    creates, and the Dubai row in the benchmark data says that cap is what
+    "drives the battery case".
+    """
+    if len(sizes_kwh) != len(recovered_kwh):
+        raise FinanceError("battery sizes and recovered energy must be the same length")
+    tranches: list[Tranche] = []
+    previous_size = 0.0
+    for index, (size, recovered) in enumerate(zip(sizes_kwh, recovered_kwh)):
+        delta_size = size - previous_size
+        if delta_size <= 0.0:
+            continue
+        tranches.append(
+            Tranche(
+                label=f"Battery tranche {index + 1}",
+                delta_capex=delta_size * capex_per_kwh,
+                delta_annual_kwh=recovered,
+                delta_opex_per_year=delta_size * opex_per_kwh_year,
+            )
+        )
+        previous_size = size
+    return tranches
+
+
+def cleaning_tranche(
+    annual_kwh: float,
+    soiling_recovered_pct: float,
+    annual_cleaning_cost: float,
+    label: str = "Cleaning regime upgrade",
+) -> Tranche:
+    """A cleaning regime as an abatement step.
+
+    `soiling_recovered_pct` has no defensible default — the soiling row in the
+    benchmark data is tiered `gap` on purpose, because installer claims of
+    15-25% loss are an upper bound rather than a design value. The caller must
+    supply it, which is why it is a required argument with no fallback.
+    """
+    if soiling_recovered_pct < 0.0:
+        raise FinanceError("soiling recovery cannot be negative")
+    return Tranche(
+        label=label,
+        delta_capex=0.0,
+        delta_annual_kwh=annual_kwh * soiling_recovered_pct / 100.0,
+        delta_opex_per_year=annual_cleaning_cost,
+    )
+
+
+def macc_ladder(
+    tranches: list[Tranche],
+    grid_factor_t_per_mwh: float,
+    degradation_pct_per_year: float,
+    life_years: int,
+    discount_rate: float | None = None,
+    currency: str = "GBP",
+) -> list[MaccStep]:
+    """Price a ladder of additive tranches into MACC steps.
+
+    Each step's abatement is its own additional energy over the project life,
+    degraded annually. Where a discount rate is given, recurring opex is
+    discounted into the step's cost so a step whose cost is all opex (a cleaning
+    regime) is comparable with one whose cost is all capex (a PV tranche).
+    """
+    steps: list[MaccStep] = []
+    for tranche in tranches:
+        generation = degraded_generation(
+            tranche.delta_annual_kwh, degradation_pct_per_year, life_years
+        )
+        if discount_rate is None:
+            opex_cost = tranche.delta_opex_per_year * life_years
+        else:
+            opex_cost = sum(
+                tranche.delta_opex_per_year / (1.0 + discount_rate) ** (y + 1)
+                for y in range(life_years)
+            )
+        steps.append(
+            MaccStep(
+                label=tranche.label,
+                delta_capex=tranche.delta_capex + opex_cost,
+                delta_tco2=abatement_tco2(generation, grid_factor_t_per_mwh),
+                delta_opex_per_year=tranche.delta_opex_per_year,
+                currency=currency,
+            )
+        )
+    return steps
 
 
 def macc_step(

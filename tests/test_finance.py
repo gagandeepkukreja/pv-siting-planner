@@ -280,3 +280,129 @@ def test_macc_step_builder_uses_the_generation_increment():
     )
     assert step.delta_tco2 == pytest.approx(131.0)
     assert step.cost_per_tco2 == pytest.approx(20_000.0 / 131.0)
+
+
+# -- battery capex -----------------------------------------------------------
+#
+# Regression: storage was priced at nothing, so a larger battery raised
+# self-consumption and therefore NPV at no capital cost — wrong about exactly
+# the decision the storage screen exists to inform.
+
+
+def test_a_battery_costs_money():
+    without = finance.total_capex(balance(), inputs())
+    with_battery = finance.total_capex(
+        balance(), inputs(battery_usable_kwh=50.0, battery_capex_per_kwh=500.0)
+    )
+    assert with_battery - without == pytest.approx(25_000.0)
+
+
+def test_battery_capex_scales_with_usable_energy():
+    small = finance.battery_capex(inputs(battery_usable_kwh=10.0, battery_capex_per_kwh=500.0))
+    large = finance.battery_capex(inputs(battery_usable_kwh=100.0, battery_capex_per_kwh=500.0))
+    assert large == pytest.approx(small * 10.0)
+
+
+def test_no_battery_costs_nothing():
+    assert finance.battery_capex(inputs()) == pytest.approx(0.0)
+
+
+def test_a_battery_without_a_price_is_refused():
+    """Silently pricing storage at zero is worse than refusing to compute."""
+    with pytest.raises(finance.FinanceError) as excinfo:
+        finance.battery_capex(inputs(battery_usable_kwh=50.0))
+    assert "free" in str(excinfo.value)
+
+
+def test_a_free_battery_can_no_longer_flatter_the_npv():
+    priced = finance.evaluate(
+        balance(), inputs(battery_usable_kwh=100.0, battery_capex_per_kwh=500.0)
+    )
+    unpriced = finance.evaluate(balance(), inputs())
+    assert priced.npv < unpriced.npv
+
+
+# -- mid-life replacement costs ---------------------------------------------
+
+
+def test_a_replacement_cost_lands_in_its_own_year():
+    plain = finance.build_cashflows(balance(), inputs())
+    with_swap = finance.build_cashflows(balance(), inputs(year_costs={12: 7_000.0}))
+    assert plain[12] - with_swap[12] == pytest.approx(7_000.0)
+    assert with_swap[11] == pytest.approx(plain[11])
+    assert with_swap[13] == pytest.approx(plain[13])
+
+
+def test_a_replacement_cost_lowers_npv():
+    assert (finance.evaluate(balance(), inputs(year_costs={12: 7_000.0})).npv
+            < finance.evaluate(balance(), inputs()).npv)
+
+
+def test_replacement_costs_reach_the_levelised_cost_too():
+    """LCOE and the cashflow must not disagree about the same project."""
+    assert (finance.evaluate(balance(), inputs(year_costs={12: 7_000.0})).lcoe_per_kwh
+            > finance.evaluate(balance(), inputs()).lcoe_per_kwh)
+
+
+# -- the abatement ladder ----------------------------------------------------
+
+
+def test_pv_tranches_split_capex_and_output_evenly():
+    tranches = finance.pv_tranches(total_capex=90_000.0, annual_kwh=90_000.0, count=3)
+    assert len(tranches) == 3
+    assert sum(t.delta_capex for t in tranches) == pytest.approx(90_000.0)
+    assert sum(t.delta_annual_kwh for t in tranches) == pytest.approx(90_000.0)
+
+
+def test_battery_tranches_are_additive_increments():
+    tranches = finance.battery_tranches(
+        sizes_kwh=[25.0, 50.0], recovered_kwh=[900.0, 400.0], capex_per_kwh=500.0
+    )
+    assert [t.delta_capex for t in tranches] == pytest.approx([12_500.0, 12_500.0])
+    assert [t.delta_annual_kwh for t in tranches] == pytest.approx([900.0, 400.0])
+
+
+def test_a_cleaning_tranche_is_all_opex_and_no_capex():
+    tranche = finance.cleaning_tranche(100_000.0, soiling_recovered_pct=3.0,
+                                       annual_cleaning_cost=2_000.0)
+    assert tranche.delta_capex == pytest.approx(0.0)
+    assert tranche.delta_annual_kwh == pytest.approx(3_000.0)
+    assert tranche.delta_opex_per_year == pytest.approx(2_000.0)
+
+
+def test_the_ladder_prices_recurring_opex_into_the_step():
+    """A step whose cost is all opex must still be comparable with a capex step."""
+    tranche = finance.cleaning_tranche(100_000.0, 3.0, 2_000.0)
+    undiscounted = finance.macc_ladder([tranche], 0.131, 0.5, 25)[0]
+    discounted = finance.macc_ladder([tranche], 0.131, 0.5, 25, discount_rate=0.07)[0]
+    assert undiscounted.delta_capex == pytest.approx(50_000.0)   # 2,000 x 25
+    assert 0.0 < discounted.delta_capex < undiscounted.delta_capex
+
+
+def test_the_full_six_step_ladder_renders():
+    tranches = (
+        finance.pv_tranches(90_000.0, 90_000.0, 3)
+        + finance.battery_tranches([25.0, 50.0], [900.0, 400.0], 500.0)
+        + [finance.cleaning_tranche(90_000.0, 2.0, 1_500.0)]
+    )
+    steps = finance.macc_ladder(tranches, 0.131, 0.5, 25, discount_rate=0.07)
+    bars = finance.macc_curve(steps)
+    assert len(bars) == 6
+    for left, right in zip(bars, bars[1:]):
+        assert left["x_end"] == pytest.approx(right["x_start"])
+        assert left["cost_per_tco2"] <= right["cost_per_tco2"]
+
+
+def test_a_battery_that_rescues_nothing_abates_nothing():
+    """Without an export limit there is no curtailment to recover, so the bar
+    is empty — and an empty bar is dropped rather than drawn at zero."""
+    tranches = finance.battery_tranches([25.0], [0.0], 500.0)
+    steps = finance.macc_ladder(tranches, 0.131, 0.5, 25)
+    assert steps[0].delta_tco2 == pytest.approx(0.0)
+    assert steps[0].cost_per_tco2 is None
+    assert finance.macc_curve(steps) == []
+
+
+def test_mismatched_battery_series_are_rejected():
+    with pytest.raises(finance.FinanceError):
+        finance.battery_tranches([25.0, 50.0], [900.0], 500.0)

@@ -13,7 +13,17 @@ from dataclasses import replace
 import streamlit as st
 from streamlit.components.v1 import html as render_html
 
-from arka import benchmarks, charts, dispatch, finance, geometry, modules, resource
+from arka import (
+    basemap,
+    benchmarks,
+    charts,
+    dispatch,
+    finance,
+    geometry,
+    incentives,
+    modules,
+    resource,
+)
 from arka.agent import client as agent_client
 from arka.scenario import (
     ArraySpec,
@@ -28,6 +38,31 @@ from arka.scenario import (
 )
 
 SCREENS = ("Site", "Array", "Yield", "Storage", "Finance", "Report")
+
+# Styling comes last in the build order and stays deliberately thin: a type
+# scale, calmer metrics, and tier badges that carry source quality into the UI.
+# Nothing here changes a number.
+CSS = """
+<style>
+  .block-container { padding-top: 2.5rem; max-width: 1400px; }
+  h1, h2, h3 { letter-spacing: -0.015em; font-weight: 650; }
+  [data-testid="stMetricValue"] { font-size: 1.7rem; font-weight: 600; }
+  [data-testid="stMetricLabel"] { text-transform: uppercase; letter-spacing: 0.06em;
+                                  font-size: 0.72rem; color: #6b6660; }
+  [data-testid="stMetric"] { background: #faf9f7; border: 1px solid #eae6e0;
+                             border-radius: 8px; padding: 0.75rem 0.9rem; }
+  section[data-testid="stSidebar"] { background: #f5f3ef; border-right: 1px solid #e6e2db; }
+  section[data-testid="stSidebar"] h1 { font-size: 1.5rem; margin-bottom: 0; }
+  .arka-tier { display: inline-block; font-size: 0.68rem; padding: 0.08rem 0.45rem;
+               border-radius: 0.7rem; margin-left: 0.3rem; vertical-align: middle; }
+  .tier-authoritative { background: #d7f2e0; color: #14532d; }
+  .tier-market-survey { background: #e2ecfa; color: #1e3a5f; }
+  .tier-installer-marketing { background: #fdf0d5; color: #6b4a08; }
+  .tier-convention { background: #eceef1; color: #3f4652; }
+  .tier-gap { background: #fadbd8; color: #7b241c; }
+  .stPlotlyChart { border: 1px solid #eae6e0; border-radius: 8px; padding: 0.35rem; }
+</style>
+"""
 
 TILES = {
     "Satellite (Esri World Imagery)": (
@@ -79,9 +114,16 @@ def assumptions_panel(sc: Scenario, key: str) -> None:
     """Rule 4: every output screen can show what fed it, with source tiers."""
     with st.expander("Assumptions and sources", expanded=False):
         rows = table().assumptions(sc.site.market.value)
-        st.caption(
-            "Tier is source quality. `gap` rows are empty on purpose — they have no "
-            "defensible open source and must be supplied by you."
+        st.markdown(
+            "Source quality: "
+            + " ".join(
+                f'<span class="arka-tier tier-{tier.value}">{tier.value}</span>'
+                for tier in benchmarks.Tier
+            )
+            + "<br><span style='font-size:0.85rem;color:#6b6660'>"
+            "<code>gap</code> rows are empty on purpose — they have no defensible open "
+            "source and must be supplied by you.</span>",
+            unsafe_allow_html=True,
         )
         st.dataframe(rows, use_container_width=True, hide_index=True, key=f"assumptions_{key}")
 
@@ -146,6 +188,7 @@ def screen_site(sc: Scenario) -> None:
         _draw_map(sc, basemap)
 
     _geojson_fallback(sc)
+    _intake_section(sc)
 
     if sc.site.boundary:
         frame, boundary, holes = frame_and_polygon(sc)
@@ -233,6 +276,59 @@ def _geojson_fallback(sc: Scenario) -> None:
             sc.site = replace(sc.site, boundary=rings[0], exclusions=rings[1:])
             sc.invalidate_from("site")
             st.rerun()
+
+
+def _intake_section(sc: Scenario) -> None:
+    """Free-text intake. The model fills in preferences, never a quantity."""
+    agent = agent_client.ArkaAgent()
+    with st.expander("Describe the site in plain English"):
+        if not agent.available:
+            st.caption(
+                f"Set {agent_client.API_KEY_ENV} to enable this. It only ever fills in "
+                "preferences and flags what is still unknown — never a figure."
+            )
+            return
+        text = st.text_area("Tell me about the site", height=100, key="intake_text",
+                            placeholder="A flat warehouse roof in Coventry, about 40 by 25 "
+                                        "metres, with plant to work around. 30p a unit.")
+        if not (st.button("Read that") and text.strip()):
+            return
+        try:
+            intake = agent.parse_intake(text)
+        except agent_client.AgentError as exc:
+            st.error(str(exc))
+            return
+
+        changes: list[str] = []
+        if intake.site.market:
+            sc.site = replace(sc.site, market=intake.site.market)
+            changes.append(f"market {intake.site.market.value}")
+        if intake.site.site_name:
+            sc.site = replace(sc.site, name=intake.site.site_name)
+        if intake.site.array_type:
+            sc.array = replace(sc.array, array_type=intake.site.array_type)
+            changes.append(intake.site.array_type.value.lower())
+        if intake.site.mounting:
+            sc.array = replace(sc.array, mounting=intake.site.mounting)
+            changes.append(intake.site.mounting.value.lower())
+        if intake.array.tilt_deg is not None:
+            sc.array = replace(sc.array, tilt_deg=intake.array.tilt_deg)
+            changes.append(f"{intake.array.tilt_deg:g}° tilt")
+
+        st.success("Set: " + ", ".join(changes) if changes else "Nothing definite to set yet.")
+        if intake.site.obstructions:
+            st.info(
+                "Mentioned as obstructions: " + ", ".join(intake.site.obstructions)
+                + ". Draw these as exclusion zones — the model cannot place them for you."
+            )
+        for item in intake.site.unresolved:
+            st.caption(f"· still needed: {item}")
+        if intake.next_question:
+            st.caption(f"**Next:** {intake.next_question}")
+        st.caption(
+            "Any tariff or load figure above is your number repeated back, not the "
+            "model's. Enter it yourself on the Finance screen."
+        )
 
 
 def _rings_from_geojson(payload: dict) -> list[list[tuple[float, float]]]:
@@ -575,14 +671,10 @@ def screen_finance(sc: Scenario) -> None:
         capex = _benchmark_input(
             "Installed cost", market, "capex", currency + " per kWp", sc.layout.kwp
         )
+        battery_capex = _battery_capex_input(sc, market, currency)
         opex = st.number_input(f"Annual opex ({currency}/yr)", 0.0, 1e9,
                                float(sc.finance_inputs.opex_per_year), 100.0)
-        incentives = st.number_input(
-            f"Year-one incentives ({currency})", 0.0, 1e9,
-            float(sc.finance_inputs.incentives_year_one), 100.0,
-            help="PM Surya Ghar CFA, Annual Investment Allowance and similar. See the "
-                 "assumptions table for the cited slab rates.",
-        )
+        year_costs = _replacement_costs_input(market, currency)
         grid_factor = _grid_factor_input(market)
 
     with right:
@@ -602,6 +694,11 @@ def screen_finance(sc: Scenario) -> None:
             float(market_table.get("Module degradation")), 0.05,
         )
 
+    # Incentives are computed from the cited slab structure, not typed into a box.
+    provisional_capex = capex * sc.layout.kwp + battery_capex * sc.battery.usable_kwh
+    scheme = incentives.for_market(market, sc.layout.kwp, provisional_capex, table())
+    _incentive_panel(scheme, currency)
+
     sc.finance_inputs = FinanceInputs(
         discount_rate=discount / 100.0 if discount > 0.0 else None,
         tariff_escalation=escalation,
@@ -611,8 +708,11 @@ def screen_finance(sc: Scenario) -> None:
         export_tariff_per_kwh=export_tariff,
         grid_emission_factor_t_per_mwh=grid_factor,
         capex_per_kwp=capex,
+        battery_capex_per_kwh=battery_capex,
+        battery_usable_kwh=sc.battery.usable_kwh,
         opex_per_year=opex,
-        incentives_year_one=incentives,
+        year_costs=year_costs,
+        incentives_year_one=scheme.amount,
         currency=currency,
     )
 
@@ -633,6 +733,12 @@ def screen_finance(sc: Scenario) -> None:
         return
     sc.finance = result
 
+    if sc.battery.usable_kwh > 0.0:
+        st.caption(
+            f"Capex includes {sc.battery.usable_kwh:,.1f} kWh of storage at "
+            f"{battery_capex:,.0f} {currency}/kWh "
+            f"({finance.battery_capex(sc.finance_inputs):,.0f} {currency})."
+        )
     metric_row(
         [
             ("NPV", f"{result.npv:,.0f} {currency}", f"At {discount:.1f}% over {life} years"),
@@ -719,6 +825,78 @@ def _grid_factor_input(market: str) -> float | None:
     return value
 
 
+def _battery_capex_input(sc: Scenario, market: str, currency: str) -> float:
+    """Storage cost per usable kWh, from the cited row where one exists."""
+    if sc.battery.usable_kwh <= 0.0:
+        st.caption("No battery selected on the Storage screen, so no storage capex applies.")
+        return 0.0
+    rows = [r for r in table().for_market(market, include_all=False).category("capex")
+            if "battery" in r.parameter.lower() and not r.is_gap]
+    if not rows:
+        st.warning(
+            f"No cited battery cost for {market}. Enter one — a battery that improves "
+            "self-consumption at no capital cost would make every storage comparison wrong."
+        )
+        return st.number_input(f"Battery cost ({currency}/usable kWh)", 0.0, 1e6, 0.0, 10.0)
+    row = rows[0]
+    if row.unit == "lump_sum":
+        # India prices a whole pack rather than per kWh; the remark gives the range.
+        st.caption(f"{row.parameter}: {row.central:,.0f} {row.currency} {row.unit}. "
+                   f"Source: {row.citation()}. {row.remarks}")
+        per_kwh = row.value() / max(sc.battery.usable_kwh, 1.0)
+    else:
+        per_kwh = row.value()
+        st.caption(f"{row.parameter}: {per_kwh:g} {row.unit}. Source: {row.citation()}.")
+    return st.number_input(f"Battery cost ({currency}/usable kWh)", 0.0, 1e6,
+                           float(round(per_kwh, 2)), 10.0)
+
+
+def _replacement_costs_input(market: str, currency: str) -> dict[int, float]:
+    """Mid-life one-off costs, seeded from any cited replacement row."""
+    rows = [r for r in table().for_market(market, include_all=False)
+            if "replacement" in r.parameter.lower() and not r.is_gap]
+    if not rows:
+        return {}
+    row = rows[0]
+    st.caption(f"{row.parameter}: {row.central:,.0f} {row.currency}. {row.remarks}")
+    with st.expander("Mid-life replacement cost"):
+        include = st.checkbox("Include it", value=True)
+        year = st.number_input("Year", 1, 40, 12, 1)
+        amount = st.number_input(f"Amount ({currency})", 0.0, 1e9, float(row.value()), 100.0)
+    return {int(year): amount} if include and amount > 0.0 else {}
+
+
+def _incentive_panel(scheme: incentives.Incentive, currency: str) -> None:
+    """Show the incentive arithmetic rather than a bare number."""
+    if scheme.amount <= 0.0:
+        st.caption("No cited capital incentive scheme applies to this market.")
+        return
+    st.success(f"{scheme.scheme}: {scheme.amount:,.0f} {currency} in year 1")
+    st.caption(scheme.explain() + ("  " + " ".join(scheme.sources) if scheme.sources else ""))
+    if scheme.capped:
+        st.warning(
+            "The subsidy cap binds. Adding capacity beyond this point earns no further "
+            "support, which changes the optimal system size."
+        )
+
+
+def _reserved_sweep(generation, load, sizes, rte, reserve, export_limit):
+    """Sweep battery sizes with a curtailment reserve applied to each."""
+    return [
+        dispatch.SweepPoint(
+            usable_kwh=size,
+            result=dispatch.simulate(
+                generation, load,
+                BatterySpec(usable_kwh=size, power_kw=size * 0.5,
+                            round_trip_efficiency=rte,
+                            curtailment_reserve_fraction=reserve),
+                export_limit_kw=export_limit,
+            ),
+        )
+        for size in sorted(sizes)
+    ]
+
+
 def _macc_section(sc: Scenario, balance: finance.EnergyBalance, grid_factor: float | None,
                   currency: str) -> None:
     st.subheader("Marginal abatement cost curve")
@@ -726,25 +904,70 @@ def _macc_section(sc: Scenario, balance: finance.EnergyBalance, grid_factor: flo
         st.info("No grid emission factor supplied, so there is no abatement to plot.")
         return
     life = int(sc.finance_inputs.project_life_years)
-    generation = finance.degraded_generation(
-        balance.generation_kwh, sc.finance_inputs.degradation_pct_per_year, life
+    rate = sc.finance_inputs.discount_rate
+
+    tranches = finance.pv_tranches(
+        total_capex=sc.finance.total_capex - finance.battery_capex(sc.finance_inputs),
+        annual_kwh=balance.generation_kwh,
+        count=3,
     )
-    tranches = 3
-    steps = [
-        finance.macc_step(
-            f"PV tranche {index + 1}",
-            delta_capex=sc.finance.total_capex / tranches,
-            delta_generation_kwh=[value / tranches for value in generation],
-            grid_factor_t_per_mwh=grid_factor,
-            currency=currency,
-        )
-        for index in range(tranches)
-    ]
-    sc.macc = steps
-    st.plotly_chart(charts.macc(finance.macc_curve(steps), currency), use_container_width=True)
+
     st.caption(
-        "Bars are marginal and additive: each is the cost and abatement of adding that step "
-        "on top of everything to its left. Battery and cleaning tranches are not modelled yet."
+        "Battery bars use the energy a battery rescues from curtailment, not energy "
+        "moved from export to self-consumption. Exported energy displaces grid "
+        "generation either way, so counting that shift would double-count abatement "
+        "already credited to the PV tranches."
+    )
+    export_limit = st.number_input(
+        "Export limit (kW) — 0 for none", 0.0, 1e6, 0.0, 1.0,
+        help="A net-metering cap or a DNO export limit. Without one a battery shifts "
+             "energy but abates nothing extra, and its bars will be empty.",
+    )
+    if export_limit > 0.0 and sc.yield_result and sc.yield_result.hourly_kwh:
+        reserve = st.slider(
+            "Capacity reserved for clipped energy (%)", 0, 100, 40, 5,
+            help="A controller that charges greedily fills the pack in the morning and "
+                 "has no room left when clipping happens at midday. Holding some back "
+                 "for energy that would otherwise be thrown away is what a real "
+                 "controller with an export limit does.",
+        ) / 100.0
+        sizes = [sc.battery.usable_kwh * f for f in (0.5, 1.0)] if sc.battery.usable_kwh > 0 else []
+        if sizes:
+            points = _reserved_sweep(
+                sc.yield_result.hourly_kwh, sc.load.hourly_kwh, [0.0, *sizes],
+                sc.battery.round_trip_efficiency, reserve, export_limit,
+            )
+            recovered = [kwh for _, kwh in dispatch.marginal_curtailment_recovered(points)][1:]
+            tranches += finance.battery_tranches(
+                sizes_kwh=sizes,
+                recovered_kwh=recovered,
+                capex_per_kwh=sc.finance_inputs.battery_capex_per_kwh or 0.0,
+            )
+
+    with st.expander("Cleaning regime upgrade"):
+        st.caption(
+            "The soiling row in the benchmark data is tiered `gap` on purpose: installer "
+            "claims of 15-25% loss are an upper bound, not a design value. Supply a "
+            "recovery figure or this bar is omitted."
+        )
+        recovery = st.number_input("Soiling loss recovered (% of annual output)", 0.0, 30.0, 0.0, 0.5)
+        cleaning_cost = st.number_input(f"Annual cleaning cost ({currency}/yr)", 0.0, 1e7, 0.0, 100.0)
+    if recovery > 0.0:
+        tranches.append(finance.cleaning_tranche(balance.generation_kwh, recovery, cleaning_cost))
+
+    steps = finance.macc_ladder(
+        tranches, grid_factor, sc.finance_inputs.degradation_pct_per_year, life,
+        discount_rate=rate, currency=currency,
+    )
+    sc.macc = steps
+    bars = finance.macc_curve(steps)
+    if not bars:
+        st.info("No step abates anything measurable, so there is no curve to draw.")
+        return
+    st.plotly_chart(charts.macc(bars, currency), use_container_width=True)
+    st.caption(
+        f"{len(bars)} additive steps. Each is the cost and abatement of adding that step "
+        "on top of everything to its left."
     )
 
 
@@ -818,6 +1041,7 @@ def _report_html(sc: Scenario) -> str:
         ]
     figure_rows = "".join(f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in figures)
 
+    satellite = _satellite_fragment(sc)
     plan = ""
     if sc.array.module and sc.layout.placements:
         plan = charts.layout_plan(
@@ -844,6 +1068,7 @@ def _report_html(sc: Scenario) -> str:
 <p class="sub">{sc.site.market.value} · {sc.array.array_type.value.replace('_', ' ').title()} ·
 {sc.array.mounting.value.title()}</p>
 <h2>Results</h2><table>{figure_rows}</table>
+<h2>Site</h2>{satellite or "<p>Satellite imagery unavailable — see the plan view below.</p>"}
 <h2>Layout</h2>{plan or "<p>No layout available.</p>"}
 <h2>Assumptions</h2>
 <p>Source tier sits next to every value. Rows marked <span class="tier tier-gap">gap</span>
@@ -854,6 +1079,28 @@ have no defensible open source and were supplied as inputs.</p>
 Generated by Arka. Every figure above is computed by pvlib, the dispatch model or the cited
 benchmark data — none is produced by a language model.</footer>
 </body></html>"""
+
+
+def _satellite_fragment(sc: Scenario) -> str | None:
+    """Satellite tiles with the array drawn over them, or None if unavailable."""
+    if len(sc.site.boundary) < 3:
+        return None
+    rings: list[list[tuple[float, float]]] = []
+    if sc.layout and sc.array.module and sc.layout.placements:
+        frame = geometry.LocalFrame.for_site(sc.site)
+        rings = [
+            frame.to_lonlat(outline)
+            for outline in geometry.module_outlines(
+                sc.layout, sc.array.module, sc.array.orientation
+            )
+        ]
+    try:
+        return basemap.satellite_figure(
+            sc.site.boundary, exclusions=sc.site.exclusions, module_rings=rings
+        )
+    except Exception as exc:  # imagery is a nicety; never fail the report for it
+        st.caption(f"Satellite imagery unavailable: {exc}")
+        return None
 
 
 def _narrative_section(sc: Scenario) -> None:
@@ -898,11 +1145,14 @@ SCREEN_FUNCTIONS = {
 
 
 def main() -> None:
-    st.set_page_config(page_title="Arka — PV siting and sizing", layout="wide")
+    st.set_page_config(
+        page_title="Arka — PV siting and sizing", page_icon="◐", layout="wide"
+    )
+    st.markdown(CSS, unsafe_allow_html=True)
     sc = scenario()
 
     with st.sidebar:
-        st.title("Arka")
+        st.title("◐ Arka")
         st.caption("PV siting and sizing from open data.")
         screen = st.radio("Screen", SCREENS, label_visibility="collapsed")
         st.divider()

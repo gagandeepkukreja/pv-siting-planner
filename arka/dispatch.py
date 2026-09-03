@@ -61,11 +61,31 @@ def simulate(
         deficit = load - direct
 
         if surplus > 0.0 and capacity > 0.0:
-            headroom = (capacity - soc) / one_way
-            take = min(surplus, step_power, max(0.0, headroom))
+            # Energy above the export limit is about to be thrown away, so it has
+            # first call on the pack — and on the reserved part of it.
+            #
+            # Charging greedily from any surplus fills the pack in the morning and
+            # leaves it full when clipping actually happens around noon. That makes
+            # a small battery look useless against an export limit and produces
+            # increasing marginal returns, which is backwards. Holding back a
+            # reserve that only clipped energy may fill is what a real controller
+            # with an export limit does, and it restores diminishing returns.
+            clipped = surplus if export_limit_kw is None else max(0.0, surplus - export_limit_kw)
+            general_ceiling = capacity * (1.0 - battery.curtailment_reserve_fraction)
+
+            take = min(clipped, step_power, max(0.0, (capacity - soc) / one_way))
             soc += take * one_way
             charged += take
             surplus -= take
+
+            remaining_power = step_power - take
+            if remaining_power > 0.0 and surplus > 0.0:
+                general = min(
+                    surplus, remaining_power, max(0.0, (general_ceiling - soc) / one_way)
+                )
+                soc += general * one_way
+                charged += general
+                surplus -= general
         elif deficit > 0.0 and capacity > 0.0:
             available = (soc - floor) * one_way
             give = min(deficit, step_power, max(0.0, available))
@@ -138,6 +158,25 @@ def sweep(
             )
         )
     return points
+
+
+def marginal_curtailment_recovered(points: list[SweepPoint]) -> list[tuple[float, float]]:
+    """(size, curtailed energy this tranche rescues vs the previous size).
+
+    This is the series the carbon side of the MACC needs. Energy merely moved
+    from export to self-consumption is not abatement — it displaced grid
+    generation either way. Only energy that would have been curtailed is new.
+    """
+    out: list[tuple[float, float]] = []
+    if not points:
+        return out
+    baseline = points[0].result.curtailed_kwh
+    previous = baseline
+    for point in points:
+        curtailed = point.result.curtailed_kwh
+        out.append((point.usable_kwh, previous - curtailed))
+        previous = curtailed
+    return out
 
 
 def marginal_shift(points: list[SweepPoint]) -> list[tuple[float, float]]:

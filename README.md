@@ -15,8 +15,10 @@ Markets: United Kingdom, India, United Arab Emirates.
 | PVGIS yield | built; parsing and caching tested against fixtures, live endpoint not yet exercised |
 | Battery dispatch and sizing | built, tested |
 | Financial model (NPV, IRR, payback, LCOE) | built, tested |
-| Marginal abatement cost curve | PV tranches built; battery and cleaning tranches not yet |
-| Agentic intake and orchestration | scaffolded — schemas, tool registry and the number guard are in place and tested; no live model call has been made |
+| Market incentives (PM Surya Ghar, UK AIA) | built, tested |
+| Marginal abatement cost curve | all six tranches built, tested |
+| Agentic intake and orchestration | built, verified live against `gemini-flash-latest` |
+| One-page HTML report with satellite image | built |
 
 ## Design principle
 
@@ -74,23 +76,53 @@ tests/
 pytest
 ```
 
-185 tests. `geometry`, `dispatch` and `finance` carry the numbers that matter and
-are tested hardest; `benchmarks` is tested for the gap rule and `agent` for the
-number guard. Nothing in the suite touches the network.
+`geometry`, `dispatch` and `finance` carry the numbers that matter and are
+tested hardest; `benchmarks` is tested for the gap rule, `incentives` for the
+subsidy slabs and their kinks, and `agent` for the number guard. Nothing in the
+suite touches the network.
+
+## What the numbers rest on
+
+Two modelling choices are worth knowing before you quote anything.
+
+**A battery abates carbon only where energy would otherwise be curtailed.**
+Exported energy displaces grid generation either way, so shifting a kWh from
+export to self-consumption changes who is paid for it, not how much carbon is
+avoided. Counting that shift would double-count abatement already credited to
+the PV tranches. The battery bars on the MACC therefore use curtailment
+recovered against an export limit — which is exactly the case a net-metering cap
+creates, and the Dubai row in the benchmark data says that cap is what "drives
+the battery case".
+
+**Dispatch reserves capacity for clipped energy.** A controller that charges
+from any available surplus fills the pack in the morning and has no headroom
+left when clipping happens around midday — in testing it was full for 372 of the
+hours when clipping occurred, making a small battery look useless and producing
+*increasing* marginal returns. `BatterySpec.curtailment_reserve_fraction` holds
+part of the pack back for energy that would otherwise be thrown away, which is
+what a real controller with an export limit does.
 
 ## Known gaps
 
-- No live PVGIS call has been made yet. The client, cache and parser are unit
-  tested against fixture payloads; the first real call will confirm the response
-  shape.
-- Module dimensions are derived from CEC cell area and a cell-count-to-width
-  table, because the CEC file carries no frame size. Override from the datasheet
-  where it matters — row pitch, and therefore capacity, depends on it.
+- No live PVGIS call has been made. The client, cache and parser are unit tested
+  against fixture payloads; the first real call will confirm the response shape.
+  This is the one unverified assumption in the stack.
+- Module dimensions are derived from CEC cell area and the cell grid, because the
+  CEC file carries no frame size. Mean error against published datasheets is
+  about 2%, but back-contact formats are worse. Override from the datasheet where
+  it matters — row pitch, and therefore capacity, depends on it.
 - Load shapes are synthetic. Replace with metered half-hourly data before any
   figure leaves the building.
-- MACC covers PV tranches only. Battery and cleaning-regime tranches are next.
-- Shading from surrounding objects is not modelled. Only row-to-row
-  self-shading sets the row pitch.
+- Shading from surrounding objects is not modelled. Only row-to-row self-shading
+  sets the row pitch.
+- PV tranches on the MACC split capex evenly, so they ignore the real fall in
+  cost per kWp with scale. The benchmark rows carry that scale effect by system
+  size if it matters to you.
+- Marginal curtailment recovery is not guaranteed monotonic across battery
+  sizes: the reserve fraction interacts with pack size. The curve sorts by cost
+  per tonne regardless.
+- Dispatch has no foresight. A perfect-foresight or MPC controller would beat the
+  reserve heuristic.
 
 ## Licence
 
