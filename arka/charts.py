@@ -18,6 +18,10 @@ import plotly.graph_objects as go
 MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
+_MODULE_FILL = "#2a4d7a"
+_MODULE_EDGE = "#16304d"
+_AREA_FILL = "#cfd8e3"
+
 _LAYOUT = dict(
     margin=dict(l=50, r=20, t=50, b=40),
     template="plotly_white",
@@ -188,7 +192,8 @@ def layout_plan(
         figure.add_trace(
             go.Scatter(
                 x=[p[0] for p in polygon_m], y=[p[1] for p in polygon_m],
-                mode="lines", name="Usable area", fill="toself", opacity=0.25,
+                mode="lines", name="Usable area", fill="toself", opacity=0.35,
+                line=dict(color="#8a94a6", width=1), fillcolor=_AREA_FILL,
             )
         )
     for hole in holes_m:
@@ -204,7 +209,11 @@ def layout_plan(
         figure.add_trace(
             go.Scatter(
                 x=[p[0] for p in closed], y=[p[1] for p in closed],
-                mode="lines", fill="toself", line=dict(width=0.5),
+                mode="lines", fill="toself",
+                # One fixed colour: every module is the same object, so letting
+                # plotly cycle its palette per trace would be noise, not meaning.
+                line=dict(width=0.5, color=_MODULE_EDGE),
+                fillcolor=_MODULE_FILL,
                 name="Module", legendgroup="modules",
                 showlegend=index == 0, hoverinfo="skip",
             )
