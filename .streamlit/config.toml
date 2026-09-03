@@ -1,0 +1,9 @@
+# Styling is deliberately minimal — CLAUDE.md build order puts UI styling last.
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
