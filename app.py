@@ -1152,7 +1152,7 @@ def main() -> None:
     sc = scenario()
 
     with st.sidebar:
-        st.title("◐ Arka")
+        st.title("Arka")
         st.caption("PV siting and sizing from open data.")
         screen = st.radio("Screen", SCREENS, label_visibility="collapsed")
         st.divider()
