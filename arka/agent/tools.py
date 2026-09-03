@@ -134,7 +134,19 @@ def lookup_benchmark(parameter: str, market: str, band: str = "central") -> dict
     the user rather than filling it in.
     """
     table = benchmarks.load()
-    row = table.find(parameter, market)
+    try:
+        row = table.find(parameter, market)
+    except benchmarks.BenchmarkNotFound as exc:
+        # Hand the model the valid names rather than raising. It guessed a
+        # parameter name; let it correct itself instead of failing the turn.
+        pool = table.for_market(market) if market else table
+        return {
+            "parameter": parameter,
+            "market": market,
+            "value": None,
+            "error": str(exc),
+            "available_parameters": sorted({r.parameter for r in pool}),
+        }
     try:
         value: float | None = row.value(band)
         reason = None

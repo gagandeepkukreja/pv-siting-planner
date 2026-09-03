@@ -151,9 +151,18 @@ class BenchmarkTable:
         partial = [r for r in pool if key in _normalise(r.parameter)]
         if partial:
             return _best(partial)
+        # Last resort: every token of the query appears somewhere in the name.
+        tokens = key.split()
+        overlap = [
+            r for r in pool
+            if tokens and all(tok in _normalise(r.parameter) for tok in tokens)
+        ]
+        if overlap:
+            return _best(overlap)
         raise BenchmarkNotFound(
             f"no benchmark matching {parameter!r}"
             + (f" for market {market!r}" if market else "")
+            + ". Available: " + ", ".join(sorted({r.parameter for r in pool})[:12])
         )
 
     def get(
@@ -254,7 +263,15 @@ def _tier(cell: str | None) -> Tier:
 
 
 def _normalise(text: str) -> str:
-    return " ".join(text.strip().lower().split())
+    """Fold a parameter name to a comparable form.
+
+    Underscores and hyphens become spaces: a model asking for
+    `grid_emission_factor` means the same row as `Grid emission factor
+    (DEFRA 2026)`, and callers should not have to guess the CSV's exact
+    punctuation.
+    """
+    swapped = text.strip().lower().replace("_", " ").replace("-", " ")
+    return " ".join(swapped.split())
 
 
 def _best(candidates: list[Benchmark]) -> Benchmark:

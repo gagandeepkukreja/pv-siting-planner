@@ -198,3 +198,56 @@ def test_the_intake_schema_carries_no_energy_or_currency_fields():
             assert not any(token in name.lower() for token in banned), (
                 f"{model.__name__}.{name} would let the model state a figure"
             )
+
+
+# -- schema compatibility with Gemini ---------------------------------------
+#
+# Found live: Gemini's schema converter rejects exclusiveMinimum/exclusiveMaximum,
+# so a Pydantic `lt=`/`gt=` constraint makes every structured-output call fail
+# with a ValidationError before any request is sent.
+
+
+def test_no_intake_field_uses_an_exclusive_bound():
+    from arka.agent.schema import ArrayIntake, FinanceIntake, Intake, SiteIntake
+
+    for model in (SiteIntake, ArrayIntake, FinanceIntake, Intake):
+        for name, field in model.model_fields.items():
+            for meta in field.metadata:
+                kind = type(meta).__name__
+                assert kind not in ("Lt", "Gt"), (
+                    f"{model.__name__}.{name} uses an exclusive bound ({kind}); "
+                    "Gemini's schema converter rejects exclusiveMinimum/exclusiveMaximum"
+                )
+
+
+def test_azimuth_360_wraps_to_zero():
+    from arka.agent.schema import ArrayIntake
+
+    assert ArrayIntake(azimuth_deg=360.0).azimuth_deg == pytest.approx(0.0)
+    assert ArrayIntake(azimuth_deg=180.0).azimuth_deg == pytest.approx(180.0)
+    assert ArrayIntake(azimuth_deg=None).azimuth_deg is None
+
+
+# -- tool robustness ---------------------------------------------------------
+#
+# Found live: the model guesses parameter names. A miss must hand it the valid
+# names to retry with, not raise and discard the whole turn.
+
+
+def test_an_unmatched_benchmark_returns_choices_instead_of_raising():
+    result = tools.lookup_benchmark("cost of a unicorn", market="UK")
+    assert result["value"] is None
+    assert result["error"]
+    assert "Grid emission factor (DEFRA 2026)" in result["available_parameters"]
+
+
+def test_automatic_function_calling_is_disabled():
+    """The SDK must not execute tools itself.
+
+    If it did, results would never pass through `tools.call`, `Turn.tool_results`
+    would be empty, and the number guard would flag every legitimate figure as
+    invented. This asserts the config we send, not the SDK's behaviour.
+    """
+    agent = client.ArkaAgent(api_key="not-a-real-key")
+    config = agent._config(with_tools=True)
+    assert config.automatic_function_calling.disable is True

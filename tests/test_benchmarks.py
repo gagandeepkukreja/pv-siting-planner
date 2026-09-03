@@ -149,3 +149,37 @@ def test_assumptions_lead_with_the_most_authoritative(table):
 def test_every_tier_explains_itself():
     for tier in benchmarks.Tier:
         assert tier.caveat
+
+
+# -- lookup robustness -------------------------------------------------------
+#
+# Found live: a model calling the benchmark tool phrases parameter names in
+# snake_case ("grid_emission_factor") while the CSV uses prose with punctuation
+# ("Grid emission factor (DEFRA 2026)"). Normalisation has to bridge that or the
+# agent's first tool call fails.
+
+
+def test_normalise_folds_underscores_and_hyphens():
+    assert benchmarks._normalise("grid_emission_factor") == "grid emission factor"
+    assert benchmarks._normalise("Market-Survey  Row") == "market survey row"
+
+
+def test_snake_case_parameter_names_resolve(table):
+    row = table.find("grid_emission_factor", market="UK")
+    assert row.value() == pytest.approx(0.131)
+
+
+def test_snake_case_gap_lookup_still_reports_a_gap(table):
+    assert table.find("discount_rate").is_gap
+
+
+def test_token_overlap_finds_a_row_with_extra_words(table):
+    # Every token present, but not as a contiguous substring.
+    row = table.find("module degradation")
+    assert row.parameter == "Module degradation"
+
+
+def test_a_missed_lookup_names_what_is_available(table):
+    with pytest.raises(benchmarks.BenchmarkNotFound) as excinfo:
+        table.find("cost of a unicorn", market="UK")
+    assert "Available:" in str(excinfo.value)

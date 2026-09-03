@@ -210,6 +210,15 @@ class ArkaAgent:
         kwargs: dict[str, Any] = {"system_instruction": SYSTEM_INSTRUCTION, "temperature": 0.0}
         if with_tools:
             kwargs["tools"] = tool_declarations()
+            # Automatic function calling would have the SDK invoke the tools itself
+            # and hand back only prose. The results would never pass through
+            # `tools.call`, so `Turn.tool_results` would be empty and the number
+            # guard would have nothing to check the prose against — it would then
+            # flag every legitimate figure as invented. Keep execution on our side
+            # of the line so the audit trail survives.
+            kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(
+                disable=True, maximum_remote_calls=None
+            )
         if response_schema is not None:
             kwargs["response_mime_type"] = "application/json"
             kwargs["response_schema"] = response_schema
@@ -241,7 +250,15 @@ class ArkaAgent:
             name = call.get("name")
             args = call.get("args") or {}
             turn.tool_calls.append((name, args))
-            turn.tool_results.append(tools.call(name, args))
+            try:
+                turn.tool_results.append(tools.call(name, args))
+            except Exception as exc:
+                # A tool that raises is a fact about this turn, not the end of it.
+                # Record it so the caller can see what was attempted and why it
+                # failed, and so one bad call does not discard the good ones.
+                turn.tool_results.append(
+                    {"tool": name, "arguments": args, "error": f"{type(exc).__name__}: {exc}"}
+                )
         turn.offenders = verify_no_invented_numbers(turn.text, turn.computed_values)
         return turn
 

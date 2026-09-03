@@ -52,7 +52,9 @@ class ArrayIntake(BaseModel):
     technology: str | None = None
     orientation: Orientation | None = None
     tilt_deg: float | None = Field(None, ge=0.0, le=90.0)
-    azimuth_deg: float | None = Field(None, ge=0.0, lt=360.0)
+    # Gemini's schema converter rejects exclusiveMinimum/exclusiveMaximum, so this
+    # is an inclusive bound and 360 is wrapped to 0 by the validator below.
+    azimuth_deg: float | None = Field(None, ge=0.0, le=360.0)
     edge_setback_m: float | None = Field(None, ge=0.0, le=10.0)
 
     @field_validator("tilt_deg", "azimuth_deg", "edge_setback_m")
@@ -61,6 +63,12 @@ class ArrayIntake(BaseModel):
         if v is not None and v != v:  # NaN
             raise ValueError("must be a finite number")
         return v
+
+    @field_validator("azimuth_deg")
+    @classmethod
+    def _wrap_azimuth(cls, v: float | None) -> float | None:
+        """360 degrees is north, same as 0. Normalise so the range is half-open."""
+        return None if v is None else v % 360.0
 
 
 class FinanceIntake(BaseModel):
