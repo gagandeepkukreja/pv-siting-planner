@@ -20,6 +20,7 @@ Markets: United Kingdom, India, United Arab Emirates.
 | Marginal abatement cost curve | all six tranches built, tested |
 | Agentic intake and orchestration | built, verified live against `gemini-flash-latest` |
 | One-page HTML report with satellite image | built |
+| Clear-sky physical guard on PVGIS output | built, tested |
 
 ## Design principle
 
@@ -82,6 +83,18 @@ tested hardest; `benchmarks` is tested for the gap rule, `incentives` for the
 subsidy slabs and their kinks, and `agent` for the number guard. Nothing in the
 suite touches the network.
 
+## The clear-sky guard
+
+PVGIS is the only irradiance source, and its response shape is the one thing
+this project cannot verify from a sandbox. So `clearsky.py` computes, entirely
+offline with pvlib, what the array would produce under a full year of clear
+skies — the brightest sky a site can have, with cells held at 25 °C and no
+losses applied. That is a hard physical ceiling: a correct PVGIS series sits
+well below it (about half in the UK, four-fifths in the Gulf), and one that has
+been scaled by a thousand, doubled, time-shifted or truncated lands above it or
+implausibly far beneath it and is refused on the Yield screen. The ceiling is a
+validator, never a displayed yield.
+
 ## What the numbers rest on
 
 Two modelling choices are worth knowing before you quote anything.
@@ -115,7 +128,8 @@ what a real controller with an export limit does.
 
 - No live PVGIS call has been made. The client, cache and parser are unit tested
   against fixture payloads; the first real call will confirm the response shape.
-  This is the one unverified assumption in the stack.
+  The clear-sky guard now catches a mis-parsed response at the point of use,
+  but it cannot confirm that a plausible-looking series is the *right* one.
 - Module dimensions are derived from CEC cell area and the cell grid, because the
   CEC file carries no frame size. Mean error against published datasheets is
   about 2%, but back-contact formats are worse. Override from the datasheet where

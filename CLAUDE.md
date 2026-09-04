@@ -51,6 +51,7 @@ arka/
   charts.py             plotly figure builders; rendering only, no arithmetic
   incentives.py         PM Surya Ghar slabs, UK AIA, computed from the CSV
   basemap.py            satellite tiles for the report export, fetched server-side
+  clearsky.py           offline physical ceiling on yield via pvlib; validates PVGIS
   agent/
     schema.py           Pydantic schemas for structured intake
     tools.py            deterministic functions exposed as tool declarations

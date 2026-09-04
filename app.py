@@ -17,6 +17,7 @@ from arka import (
     basemap,
     benchmarks,
     charts,
+    clearsky,
     dispatch,
     finance,
     geometry,
@@ -534,6 +535,7 @@ def screen_yield(sc: Scenario) -> None:
         ]
     )
     _yield_cross_check(sc, result)
+    _clear_sky_guard(sc, result)
 
     st.plotly_chart(charts.monthly_generation(result.monthly_kwh), use_container_width=True)
     if result.hourly_kwh:
@@ -543,6 +545,46 @@ def screen_yield(sc: Scenario) -> None:
         )
     st.caption(f"Source: {result.source}. Data period {result.year_range}.")
     assumptions_panel(sc, "yield")
+
+
+def _clear_sky_guard(sc: Scenario, result) -> None:
+    """Hold the PVGIS series against a physical ceiling computed offline.
+
+    A clear sky is the brightest a site gets, so clear-sky output is a hard
+    upper bound on any real year. A series above it has been mis-parsed or
+    mis-scaled, whatever PVGIS said. This is the check that catches a wrong
+    response shape without needing a second data source.
+    """
+    centre = sc.site.centre
+    try:
+        bound = clearsky.ceiling(
+            centre[1], centre[0], result_tilt(sc), result_azimuth(sc), result.kwp
+        )
+        verdict = clearsky.check(result, bound)
+    except clearsky.ClearSkyError as exc:
+        st.caption(f"Clear-sky guard unavailable: {exc}")
+        return
+    if verdict.ok:
+        st.caption(
+            f"Clear-sky guard: {verdict.ratio:.0%} of the physical ceiling "
+            f"({bound.specific_yield_kwh_per_kwp:,.0f} kWh/kWp under a year of clear skies). "
+            "The series is physically possible."
+        )
+        return
+    st.error(
+        "The yield data fails a physical check and should not be used. "
+        + " ".join(verdict.problems)
+    )
+
+
+def result_tilt(sc: Scenario) -> float:
+    return sc.layout.tilt_deg if sc.layout else sc.array.tilt_deg
+
+
+def result_azimuth(sc: Scenario) -> float:
+    if sc.layout:
+        return sc.layout.azimuth_deg
+    return sc.array.azimuth_deg if sc.array.azimuth_deg is not None else 180.0
 
 
 def _yield_cross_check(sc: Scenario, result) -> None:
