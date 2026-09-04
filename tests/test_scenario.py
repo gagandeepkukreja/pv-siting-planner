@@ -183,3 +183,15 @@ def test_finance_inputs_default_the_gap_rows_to_none():
     assert inputs.discount_rate is None
     assert inputs.tariff_escalation is None
     assert "discount_rate" in inputs.missing()
+
+
+def test_a_pasted_view_centre_round_trips():
+    scenario = Scenario(site=Site(view_centre=(55.2708, 25.2048)))
+    restored = Scenario.from_json(scenario.to_json())
+    assert restored.site.view_centre == pytest.approx((55.2708, 25.2048))
+    assert restored.site.boundary == []
+
+
+def test_view_centre_defaults_to_none():
+    assert Site().view_centre is None
+    assert Scenario.from_json(Scenario().to_json()).site.view_centre is None

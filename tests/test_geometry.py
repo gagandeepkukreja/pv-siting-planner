@@ -273,3 +273,103 @@ def test_unbuilt_array_types_raise_rather_than_falling_back(site, rooftop_spec, 
     poly = geometry.ring_to_polygon(site.boundary, frame)
     with pytest.raises(NotImplementedError):
         geometry.pack(poly, array_type, rooftop_spec, latitude=frame.origin_lat)
+
+
+# -- coordinates typed by hand ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "25.2048, 55.2708",
+        "25.2048 55.2708",
+        "25.2048; 55.2708",
+        "lat 25.2048 lon 55.2708",
+        "latitude: 25.2048, longitude: 55.2708",
+        "25.2048° N, 55.2708° E",
+        "  25.2048,55.2708  ",
+    ],
+)
+def test_every_common_paste_form_parses(text):
+    assert geometry.parse_latlon(text) == pytest.approx((25.2048, 55.2708))
+
+
+def test_southern_and_western_hemispheres_go_negative():
+    assert geometry.parse_latlon("33.8688 S, 151.2093 E") == pytest.approx((-33.8688, 151.2093))
+    assert geometry.parse_latlon("51.5074 N, 0.1278 W") == pytest.approx((51.5074, -0.1278))
+
+
+def test_longitude_first_is_swapped_when_unambiguous():
+    # 151 cannot be a latitude, so this is lon, lat.
+    assert geometry.parse_latlon("151.2093, -33.8688") == pytest.approx((-33.8688, 151.2093))
+
+
+def test_a_single_number_is_rejected():
+    with pytest.raises(ValueError):
+        geometry.parse_latlon("25.2048")
+
+
+def test_three_numbers_are_rejected():
+    with pytest.raises(ValueError):
+        geometry.parse_latlon("25.2, 55.2, 12")
+
+
+def test_an_impossible_coordinate_is_rejected():
+    with pytest.raises(ValueError):
+        geometry.parse_latlon("95.0, 200.0")
+
+
+# -- a rectangle dropped on a point -----------------------------------------
+
+
+def test_rectangle_has_the_requested_area_on_the_ground():
+    ring = geometry.rectangle_around(-0.12, 51.5, width_m=40.0, depth_m=25.0)
+    frame = geometry.LocalFrame(origin_lon=-0.12, origin_lat=51.5)
+    poly = geometry.ring_to_polygon(ring, frame)
+    assert geometry.area_m2(poly) == pytest.approx(1000.0, rel=1e-6)
+
+
+def test_rectangle_is_centred_on_the_point():
+    ring = geometry.rectangle_around(55.2708, 25.2048, 30.0, 20.0)
+    lons = [p[0] for p in ring]
+    lats = [p[1] for p in ring]
+    assert sum(lons) / 4 == pytest.approx(55.2708, abs=1e-9)
+    assert sum(lats) / 4 == pytest.approx(25.2048, abs=1e-9)
+
+
+def test_rectangle_is_a_true_rectangle_far_from_the_equator():
+    """Degrees of longitude shrink with latitude; the rectangle must not."""
+    ring = geometry.rectangle_around(18.0, 68.0, width_m=40.0, depth_m=40.0)   # Arctic Norway
+    frame = geometry.LocalFrame(origin_lon=18.0, origin_lat=68.0)
+    xs = [p[0] for p in frame.to_metric(ring)]
+    ys = [p[1] for p in frame.to_metric(ring)]
+    assert max(xs) - min(xs) == pytest.approx(40.0, rel=1e-6)
+    assert max(ys) - min(ys) == pytest.approx(40.0, rel=1e-6)
+
+
+def test_bearing_rotates_the_long_axis():
+    frame = geometry.LocalFrame(origin_lon=-0.12, origin_lat=51.5)
+    north = frame.to_metric(geometry.rectangle_around(-0.12, 51.5, 10.0, 40.0, bearing_deg=0.0))
+    east = frame.to_metric(geometry.rectangle_around(-0.12, 51.5, 10.0, 40.0, bearing_deg=90.0))
+    span = lambda pts, i: max(p[i] for p in pts) - min(p[i] for p in pts)  # noqa: E731
+    assert span(north, 1) == pytest.approx(40.0, rel=1e-6)     # depth runs north-south
+    assert span(east, 0) == pytest.approx(40.0, rel=1e-6)      # now east-west
+
+
+def test_rectangle_packs_like_any_other_boundary():
+    """The whole point: a pasted coordinate should get someone to a kWp figure."""
+    from arka.scenario import ArraySpec, Site
+    from tests.conftest import MODULE_550
+
+    ring = geometry.rectangle_around(-1.5197, 52.4068, 40.0, 25.0)
+    site = Site(boundary=ring)
+    frame = geometry.LocalFrame.for_site(site)
+    poly = geometry.ring_to_polygon(ring, frame)
+    spec = ArraySpec(module=MODULE_550, tilt_deg=10.0, azimuth_deg=180.0)
+    layout = geometry.pack(poly, ArrayType.ROOFTOP, spec, latitude=52.4068)
+    assert layout.module_count > 100
+
+
+def test_a_zero_sized_rectangle_is_rejected():
+    with pytest.raises(geometry.PackingError):
+        geometry.rectangle_around(0.0, 0.0, 0.0, 10.0)

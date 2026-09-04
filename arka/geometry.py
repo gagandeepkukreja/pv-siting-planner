@@ -18,6 +18,7 @@ Coordinate conventions
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 
 from pyproj import CRS, Transformer
@@ -80,6 +81,71 @@ class LocalFrame:
     def to_lonlat(self, points: list[tuple[float, float]]) -> list[LonLat]:
         t = self._to_wgs84()
         return [t.transform(x, y) for x, y in points]
+
+
+# ---------------------------------------------------------------------------
+# Coordinates typed by hand
+# ---------------------------------------------------------------------------
+
+_COORD_NOISE = re.compile(r"(?i)\b(lat|latitude|lon|lng|long|longitude)\b|[:=°]")
+_COORD_TOKEN = re.compile(r"(-?\d+(?:\.\d+)?)\s*([NSEW])?", re.IGNORECASE)
+
+
+def parse_latlon(text: str) -> tuple[float, float]:
+    """(lat, lon) from something a person pasted.
+
+    Accepts the forms that turn up in practice: "25.2048, 55.2708" straight
+    out of Google Maps, "25.2048 55.2708", "lat 25.2048 lon 55.2708",
+    "25.2048° N, 55.2708° E", and the same with a semicolon. Latitude is
+    expected first, as every mapping app presents it; a pair that only makes
+    sense the other way round is swapped rather than rejected.
+    """
+    cleaned = _COORD_NOISE.sub(" ", text.strip())
+    found = [(float(v), (h or "").upper()) for v, h in _COORD_TOKEN.findall(cleaned)]
+    if len(found) != 2:
+        raise ValueError(
+            f"expected two numbers, latitude then longitude, found {len(found)} in {text!r}"
+        )
+    values = []
+    for value, hemisphere in found:
+        if hemisphere in ("S", "W"):
+            value = -abs(value)
+        elif hemisphere in ("N", "E"):
+            value = abs(value)
+        values.append(value)
+    lat, lon = values
+    if abs(lat) > 90.0 and abs(lon) <= 90.0:
+        lat, lon = lon, lat            # they gave longitude first
+    if not -90.0 <= lat <= 90.0:
+        raise ValueError(f"latitude {lat} is outside -90..90")
+    if not -180.0 <= lon <= 180.0:
+        raise ValueError(f"longitude {lon} is outside -180..180")
+    return (lat, lon)
+
+
+def rectangle_around(lon: float, lat: float, width_m: float, depth_m: float,
+                     bearing_deg: float = 0.0) -> Ring:
+    """A width x depth metre rectangle centred on a point, as a lon/lat ring.
+
+    `depth_m` runs along `bearing_deg` (clockwise from north, so 0 puts the
+    long axis north-south) and `width_m` across it. Built in the site-local
+    metric frame, so it is a true rectangle on the ground rather than in
+    degrees, which matters increasingly far from the equator.
+    """
+    if width_m <= 0.0 or depth_m <= 0.0:
+        raise PackingError("rectangle width and depth must be positive")
+    frame = LocalFrame(origin_lon=lon, origin_lat=lat)
+    theta = math.radians(bearing_deg)
+    depth_axis = (math.sin(theta), math.cos(theta))      # x east, y north
+    width_axis = (math.cos(theta), -math.sin(theta))
+    hw, hd = width_m / 2.0, depth_m / 2.0
+    corners_m = [
+        (-hw * width_axis[0] - hd * depth_axis[0], -hw * width_axis[1] - hd * depth_axis[1]),
+        (hw * width_axis[0] - hd * depth_axis[0], hw * width_axis[1] - hd * depth_axis[1]),
+        (hw * width_axis[0] + hd * depth_axis[0], hw * width_axis[1] + hd * depth_axis[1]),
+        (-hw * width_axis[0] + hd * depth_axis[0], -hw * width_axis[1] + hd * depth_axis[1]),
+    ]
+    return frame.to_lonlat(corners_m)
 
 
 # ---------------------------------------------------------------------------

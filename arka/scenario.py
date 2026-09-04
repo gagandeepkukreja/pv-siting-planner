@@ -63,6 +63,8 @@ class Site:
     market: Market = Market.UK
     boundary: Ring = field(default_factory=list)
     exclusions: list[Ring] = field(default_factory=list)
+    #: Where the map should look before a boundary exists — a pasted coordinate.
+    view_centre: LonLat | None = None
 
     @property
     def centre(self) -> LonLat | None:
@@ -374,6 +376,7 @@ class Scenario:
                 market=Market(site.get("market", Market.UK.value)),
                 boundary=[tuple(v) for v in site.get("boundary", [])],
                 exclusions=[[tuple(v) for v in ring] for ring in site.get("exclusions", [])],
+                view_centre=tuple(site["view_centre"]) if site.get("view_centre") else None,
             ),
             array=ArraySpec(
                 array_type=ArrayType(array.get("array_type", ArrayType.ROOFTOP.value)),

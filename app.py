@@ -86,6 +86,25 @@ MARKET_HOME = {
 # ---------------------------------------------------------------------------
 
 
+def gemini_key() -> str | None:
+    """The model key, from the environment or Streamlit's secrets store.
+
+    Streamlit Community Cloud delivers dashboard secrets through `st.secrets`,
+    not the environment, so both are checked. `st.secrets` raises when no
+    secrets file exists at all, which is the normal case locally.
+    """
+    import os
+
+    key = os.environ.get(agent_client.API_KEY_ENV)
+    if key:
+        return key
+    try:
+        value = st.secrets.get(agent_client.API_KEY_ENV)
+    except Exception:
+        return None
+    return str(value) if value else None
+
+
 def scenario() -> Scenario:
     if "scenario" not in st.session_state:
         st.session_state.scenario = Scenario()
@@ -188,6 +207,7 @@ def screen_site(sc: Scenario) -> None:
     with left:
         _draw_map(sc, basemap)
 
+    _coordinates_section(sc)
     _geojson_fallback(sc)
     _intake_section(sc)
 
@@ -222,6 +242,8 @@ def _draw_map(sc: Scenario, basemap: str) -> None:
     centre = sc.site.centre
     if centre is not None:
         lat, lon, zoom = centre[1], centre[0], 18
+    elif sc.site.view_centre is not None:
+        lat, lon, zoom = sc.site.view_centre[1], sc.site.view_centre[0], 19
     else:
         lat, lon, zoom = MARKET_HOME[sc.site.market]
 
@@ -236,6 +258,11 @@ def _draw_map(sc: Scenario, basemap: str) -> None:
         },
     ).add_to(fmap)
 
+    if sc.site.view_centre is not None and not sc.site.boundary:
+        folium.Marker(
+            location=[sc.site.view_centre[1], sc.site.view_centre[0]],
+            tooltip="Pasted coordinate — draw the roof around this",
+        ).add_to(fmap)
     if sc.site.boundary:
         folium.Polygon(
             locations=[(lat_, lon_) for lon_, lat_ in sc.site.boundary],
@@ -261,6 +288,40 @@ def _draw_map(sc: Scenario, basemap: str) -> None:
             st.rerun()
 
 
+def _coordinates_section(sc: Scenario) -> None:
+    """Paste a lat/long to jump the map there, or drop a rectangle on it."""
+    with st.expander("Paste coordinates", expanded=not sc.site.boundary):
+        text = st.text_input(
+            "Latitude, longitude", key="coord_text",
+            placeholder="25.2048, 55.2708  — straight from Google Maps",
+        )
+        parsed: tuple[float, float] | None = None
+        if text.strip():
+            try:
+                parsed = geometry.parse_latlon(text)
+                st.caption(f"Read as latitude {parsed[0]:.5f}, longitude {parsed[1]:.5f}.")
+            except ValueError as exc:
+                st.error(str(exc))
+
+        left, right = st.columns(2)
+        with left:
+            if st.button("Centre the map here", disabled=parsed is None):
+                sc.site = replace(sc.site, view_centre=(parsed[1], parsed[0]))
+                st.rerun()
+        with right:
+            st.caption("Or skip drawing: drop a rectangle of known size on the point.")
+            width = st.number_input("Width (m)", 1.0, 2000.0, 20.0, 1.0, key="rect_w")
+            depth = st.number_input("Depth (m)", 1.0, 2000.0, 12.0, 1.0, key="rect_d")
+            bearing = st.slider("Long-axis bearing (° from north)", 0, 179, 0, 1, key="rect_b",
+                                help="0 puts the depth north-south, 90 east-west.")
+            if st.button("Draw this rectangle here", disabled=parsed is None):
+                ring = geometry.rectangle_around(parsed[1], parsed[0], width, depth, bearing)
+                sc.site = replace(sc.site, boundary=ring, exclusions=[],
+                                  view_centre=(parsed[1], parsed[0]))
+                sc.invalidate_from("site")
+                st.rerun()
+
+
 def _geojson_fallback(sc: Scenario) -> None:
     with st.expander("Paste GeoJSON instead"):
         st.caption("A Polygon, or a FeatureCollection whose first polygon is the boundary.")
@@ -281,7 +342,7 @@ def _geojson_fallback(sc: Scenario) -> None:
 
 def _intake_section(sc: Scenario) -> None:
     """Free-text intake. The model fills in preferences, never a quantity."""
-    agent = agent_client.ArkaAgent()
+    agent = agent_client.ArkaAgent(api_key=gemini_key())
     with st.expander("Describe the site in plain English"):
         if not agent.available:
             st.caption(
@@ -1249,7 +1310,7 @@ def _satellite_fragment(sc: Scenario) -> str | None:
 
 def _narrative_section(sc: Scenario) -> None:
     st.subheader("Narrative")
-    agent = agent_client.ArkaAgent()
+    agent = agent_client.ArkaAgent(api_key=gemini_key())
     if not agent.available:
         st.caption(
             f"Set {agent_client.API_KEY_ENV} to have the model draft the narrative. "
